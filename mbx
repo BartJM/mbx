@@ -37,6 +37,7 @@ usage() {
   echo "   stop: stop all env VMs"
   echo "   start: start all env VMs"
   echo "   destroy: destroy environment"
+  echo "   pd|package_deploy: package and deploy"
 }
 
 init() {
@@ -93,34 +94,42 @@ list() {
 }
 
 package() {
-  if [[ "$1" == "-h" ]]; then
-    echo "Usage: mbx package <repo url> <tag|sha|branch name|pr number> <option distro: centos7/centos8/debian>"
+  package_usage() {
+    echo "mbx package [-h] [-l directory] [-u url|github project] [-t tag|sha|branch name|pr number] [-d distro]"
+    echo "-h: show help"
+    echo "-l: use local directory as source"
+    echo "-u: the url/github project to use. url starts with \"http[s]://\""
+    echo "-t: tag|sha|branch name|pr number"
+    echo "-d: the distro to build (centos7/centos8/debian)"
     exit 0
-  fi
+  }
 
-  url="${1:-apache/cloudstack}"
-  echo $url | egrep "^https?://" || url="https://github.com/$url"
-  tag="${2:-master}"
-  distro="${3:-centos7}"
+  local OPTIND options l h u t d
+  while getopts "l:hu:t:d:" options; do
+    case "${options}" in
+      h)
+        package_usage
+        ;;
+      u)
+        url=$OPTARG
+        ;;
+      t)
+        tag=$OPTARG
+        ;;
+      d)
+        distro=$OPTARG
+        ;;
+      l)
+        local_dir=$OPTARG
+        ;;
+    esac
+  done
 
-  re='^[0-9]+$'
-  [[ $tag =~ $re ]] && pr_id=$tag && output_dir="${output_dir:=/export/testing/builds/pr/$tag/$distro}"
-  output_dir="${output_dir:=/export/testing/builds/$tag/$distro}"
-
-  CUR=$(pwd)
-  uuid=$(uuid)
-  packaging_dir="/tmp/mbx/cloudstack/$uuid"
-
-  echo "Pulling $url:$tag to $packaging_dir"
-  mkdir -p $packaging_dir
-  cd $packaging_dir
-
-  git init $(pwd)
-  git fetch --tags --progress $url --depth 1 +refs/heads/*:refs/remotes/origin/* > /dev/null
-  git config remote.origin.url $url
-  git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
-
-  cd $CUR
+  if [ -z $url ]; then url="apache/cloudstack"; fi
+  # TODO remove printing of url?
+  if [ -z $local_dir ]; then echo $url | egrep "^https?://" || url="https://github.com/$url"; fi
+  if [ -z $tag ]; then tag="master"; fi
+  if [ -z $distro ]; then distro="centos7"; fi
 
   # TODO: Build all simultaniously
   case "$distro" in
@@ -130,11 +139,42 @@ package() {
     *) echo "Unknown distro" && exit 1;;
   esac
 
+  re='^[0-9]+$'
+  [[ $tag =~ $re ]] && pr_id=$tag && output_dir="${output_dir:=/export/testing/builds/pr/$tag/$distro}"
+  output_dir="${output_dir:=/export/testing/builds/$tag/$distro}"
+  if [ -n "$local_dir" ]; then output_dir="/export/testing/builds/local/$tag/$distro"; fi
+
+  CUR=$(pwd)
+  uuid=$(uuid)
+  packaging_dir="/tmp/mbx/cloudstack/$uuid"
+
+  if [ -n "$local_dir" ]; then
+    cd $local_dir
+    local_dir=$(pwd)
+    cd $CUR
+  fi
+  mkdir -p $packaging_dir
+  cd $packaging_dir
+
+  if [ -n "$local_dir" ]; then
+    echo "Copying $local_dir to $packaging_dir"
+    cp -Tr "$local_dir" "$packaging_dir"
+  else
+    echo "Pulling $url:$tag to $packaging_dir"
+    git init $(pwd)
+    git fetch --tags --progress $url --depth 1 +refs/heads/*:refs/remotes/origin/* > /dev/null
+    git config remote.origin.url $url
+    git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+  fi
+
+  cd $CUR
+
   echo "Pulling docker build container image $image_name"
   docker pull $image_name
 
   echo "Building packages for $distro"
   uuid=`uuid`
+
   container_name="builder-$uuid"
 
   rm -rf $output_dir || true
@@ -148,9 +188,11 @@ package() {
 
   echo "Packages can be found at $output_dir"
 
+  echo $container_name
   docker kill $container_name
   docker rm $container_name
   rm -rf $packaging_dir || true
+  ret_val=$output_dir
 }
 
 check_mbxt() {
@@ -194,10 +236,34 @@ seed_systemvmtemplate() {
 }
 
 deploy() {
-  if [[ "$1" == "-h" ]]; then
-    echo "Usage: mbx deploy <name of env> <mgmt server template> <hypervisor template> <repo url>"
+  deploy_usage() {
+    echo "Usage: mbx deploy -n <name of env> -s <mgmt server template> -t <hypervisor template> -u <repo url>"
     exit 0
-  fi
+  }
+
+  local OPTIND options h n s t u l
+  while getopts "hn:s:t:u:l:" options; do
+    case "${options}" in
+      h)
+        deploy_usage
+        ;;
+      n)
+        name=$OPTARG
+        ;;
+      s)
+        mst=$OPTARG
+        ;;
+      t)
+        hyt=$OPTARG
+        ;;
+      u)
+        repo=$OPTARG
+        ;;
+      l)
+        local_packages=$OPTARG
+        ;;
+    esac
+  done
 
   id=
   for idx in {1..20}; do
@@ -211,14 +277,14 @@ deploy() {
     exit 1
   fi
 
-  name=${1:-"mbx-cs415"}
-  mst=${2:-"mbxt-kvm-centos7"}
-  hyt=${3:-"mbxt-kvm-centos7"}
+  if [ -z $name ]; then name="mbx-cs415"; fi
+  if [ -z $mst ]; then mst=$"mbxt-kvm-centos7"; fi
+  if [ -z $hyt ]; then hyt="mbxt-kvm-centos7"; fi
   # Validate templates
   check_mbxt mgmt $mst
   check_mbxt hypervisor $hyt
   hypervisor=$(echo $hyt |  awk '{print substr($0,6,3)}')
-  repo=${4:-"http://packages.shapeblue.com/cloudstack/upstream/centos7/4.17"}
+  if [ -z $repo ]; then repo="http://packages.shapeblue.com/cloudstack/upstream/centos7/4.17"; fi
 
   uuid=$(cat /proc/sys/kernel/random/uuid | sed 's/-.*//g')
   env="qa$id-$name-$uuid-$hypervisor"
@@ -226,7 +292,11 @@ deploy() {
   echo -e "Building env with name: \033[4m$env\033[0m"
   echo "Management server template: $mst"
   echo "Hypervisor template: $hyt"
-  echo "Package repo: $repo"
+  if [ -n "$local_packages" ]; then
+    echo "Package repo: $repo"
+  else
+    echo "Package dir: $local_packages"
+  fi
 
   mkdir -p $ROOT/boxes/$env
   echo $env >> $ROOT/boxes/boxes.list
@@ -322,19 +392,33 @@ deploy() {
   issh root@$msip yum reinstall -y python3-pip
   issh root@$msip "pip3 install --upgrade pip && pip3 install --ignore-installed netaddr mysql-connector-python"
   issh root@$msip "pip2 install --upgrade pip && pip2 install --ignore-installed netaddr mysql-connector-python"
-  issh root@$msip yum install -y cloudstack-management cloudstack-usage cloudstack-common cloudstack-integration-tests cloudstack-marvin
+  if [ -n "$local_packages" ]; then
+    iscp "$local_packages/"{cloudstack-management,cloudstack-usage,cloudstack-common,cloudstack-integration-tests,cloudstack-marvin}* root@$msip:
+    issh root@$msip yum install -y cloudstack-common* cloudstack-management* cloudstack-usage* cloudstack-integration-tests* cloudstack-marvin*
+  else
+    issh root@$msip yum install -y cloudstack-management cloudstack-usage cloudstack-common cloudstack-integration-tests cloudstack-marvin
+  fi
   issh root@$msip "cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i $msip"
   issh root@$msip "mysql -u root --execute=\"INSERT INTO cloud.configuration (category, instance, component, name, value) VALUES ('Advanced', 'DEFAULT', 'management-server', 'integration.api.port', '8096');\""
   issh root@$msip cloudstack-setup-management
 
+  # TODO Add systemvm upload??
+
   # Setup KVM hosts
   if [[ $hypervisor == "kvm" ]]; then
-    # Fix EL7 repo
-    issh root@$env-host1 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
-    issh root@$env-host1 yum install -y cloudstack-agent
-    # Fix EL7 repo
-    issh root@$env-host2 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
-    issh root@$env-host2 yum install -y cloudstack-agent
+    if [ -n "$local_packages" ]; then
+      iscp "$local_packages/"{cloudstack-agent,cloudstack-common}* root@$env-host1:
+      iscp "$local_packages/"{cloudstack-agent,cloudstack-common}* root@$env-host2:
+      issh root@$env-host1 yum install -y cloudstack-common* cloudstack-agent*
+      issh root@$env-host2 yum install -y cloudstack-common* cloudstack-agent*
+    else
+      # Fix EL7 repo
+      issh root@$env-host1 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
+      issh root@$env-host1 yum install -y cloudstack-agent
+      # Fix EL7 repo
+      issh root@$env-host2 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
+      issh root@$env-host2 yum install -y cloudstack-agent
+    fi
     # Install qemu-kvm-ev on EL7
     if [[ "$hyt" == ""mbxt-kvm-centos7 ]]; then
       issh root@$env-host1 "yum install -y centos-release-qemu-ev && yum install -y qemu-kvm-ev"
@@ -677,6 +761,49 @@ destroy() {
   sudo rm -fr /export/testing/$env
 }
 
+package_deploy() {
+  # TODO improve return values?
+  # TODO have distro also determine the deploy template
+  pd_usage() {
+    echo "See package usage + -n for deploy name, -s for manager template, -y for hv template"
+    exit 0
+  }
+  local OPTIND options h u t d l n s y
+  while getopts "hu:t:d:l:n:s:y:" options; do
+    case "${options}" in
+      h)
+        pd_usage
+        ;;
+      u)
+        url=$OPTARG
+        ;;
+      t)
+        tag=$OPTARG
+        ;;
+      d)
+        distro=$OPTARG
+        ;;
+      l)
+        local_dir=$OPTARG
+        ;;
+      n)
+        name=$OPTARG
+        ;;
+      s)
+        mst=$OPTARG
+        ;;
+      y)
+        hyt=$OPTARG
+        ;;
+    esac
+  done
+  local ret_val=""
+  echo "Packaging"
+  package
+  echo "Deploying"
+  deploy -l $ret_val
+}
+
 case "$1" in
     help) usage;;
     -h) usage;;
@@ -692,5 +819,7 @@ case "$1" in
     start) start $2;;
     stop) stop $2;;
     destroy) destroy $2;;
+    pd) package_deploy ${@:2};;
+    package_deploy) package_deploy ${@:2};;
     *) usage;;
 esac
