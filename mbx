@@ -53,15 +53,19 @@ init() {
   fi
   echo "Setting up mbx sudoers file. Please enter sudoer password if you're prompted."
   sudo cp $ROOT/files/sudoer.mbx /etc/sudoers.d/mbx
+  if [ ! -d  '/export/monkeybox/templates' ]; then
+    mkdir -p '/export/monkeybox/templates'
+    cp $ROOT/templates/md5sum.txt /export/monkeybox/templates
+  fi
   echo "Updating templates"
   for template in $(cat $ROOT/templates/md5sum.txt | awk '{print $2}' | sed 's/.qcow2//g'); do
     virsh undefine mbxt-$template >/dev/null 2>/dev/null || true
     echo "Updating template: $template"
-    wget -nc https://download.cloudstack.org/templates/mbx/$template.qcow2 -O $ROOT/templates/$template.qcow2 || true
+    wget -nc https://download.cloudstack.org/templates/mbx/$template.qcow2 -O /export/monkeybox/templates/$template.qcow2 || true
     virsh define $ROOT/templates/xmls/mbxt-$template.xml >/dev/null
   done
   echo "Running md5 checksum checks on templates (this may take some time...)"
-  (cd $ROOT/templates && md5sum --check md5sum.txt)
+  (cd /export/monkeybox/templates && md5sum --check md5sum.txt)
   sudo cp $ROOT/files/libvhd.so.1.0 /usr/lib/
   sudo ldconfig
   sudo cp $ROOT/files/vhd-util /usr/bin/
@@ -165,6 +169,8 @@ package() {
     git fetch --tags --progress $url --depth 1 +refs/heads/*:refs/remotes/origin/* > /dev/null
     git config remote.origin.url $url
     git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+    git checkout $tag
+    git pull origin $tag
   fi
 
   cd $CUR
@@ -214,7 +220,7 @@ seed_systemvmtemplate() {
   version=$1
   hypervisor=$2
   sstore_path=$3
-  cache_path=/export/monkeybox/templates/cache/$version/$hypervisor
+  cache_path=$ROOT/templates/cache/$version/$hypervisor
   url=$(cat $ROOT/files/systemvm-map.json | jq -r ".[\"${version}\"].${hypervisor}.url")
   checksum=$(cat $ROOT/files/systemvm-map.json | jq -r ".[\"${version}\"].${hypervisor}.checksum")
   template_path=$cache_path/${url##*/}
@@ -232,7 +238,7 @@ seed_systemvmtemplate() {
   if [[ "$hypervisor" == "vmw" ]]; then
     hypervisor="vmware"
   fi
-  sudo /export/monkeybox/files/setup-systemvmtemplate.sh -m $sstore_path -f $template_path -h $hypervisor -F
+  sudo $ROOT/files/setup-systemvmtemplate.sh -m $sstore_path -f $template_path -h $hypervisor -F
 }
 
 deploy() {
@@ -287,8 +293,8 @@ deploy() {
   if [ -z $repo ]; then repo="http://packages.shapeblue.com/cloudstack/upstream/centos7/4.17"; fi
 
   uuid=$(cat /proc/sys/kernel/random/uuid | sed 's/-.*//g')
-  env="qa$id-$name-$uuid-$hypervisor"
-
+  env=$(echo "qa$id-$name-$uuid-$hypervisor" | awk '{print tolower($0)}')
+  
   echo -e "Building env with name: \033[4m$env\033[0m"
   echo "Management server template: $mst"
   echo "Hypervisor template: $hyt"
@@ -406,17 +412,17 @@ deploy() {
 
   # Setup KVM hosts
   if [[ $hypervisor == "kvm" ]]; then
+    # Fix EL7 repo
+    issh root@$env-host1 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
+    # Fix EL7 repo
+    issh root@$env-host2 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
     if [ -n "$local_packages" ]; then
       iscp "$local_packages/"{cloudstack-agent,cloudstack-common}* root@$env-host1:
       iscp "$local_packages/"{cloudstack-agent,cloudstack-common}* root@$env-host2:
       issh root@$env-host1 yum install -y cloudstack-common* cloudstack-agent*
       issh root@$env-host2 yum install -y cloudstack-common* cloudstack-agent*
     else
-      # Fix EL7 repo
-      issh root@$env-host1 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
       issh root@$env-host1 yum install -y cloudstack-agent
-      # Fix EL7 repo
-      issh root@$env-host2 "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
       issh root@$env-host2 yum install -y cloudstack-agent
     fi
     # Install qemu-kvm-ev on EL7

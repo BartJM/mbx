@@ -24,26 +24,6 @@ export ROOT=/jenkins
 cd $ROOT
 rm -fr deps/*jar deps/awsapi-lib deps/*.mar NONOSS
 
-if [[ "${PR_ID}" != "" ]]; then
-  # Find base branch
-  BASE=$(curl https://api.github.com/repos/apache/cloudstack/pulls/$PR_ID | jq -r '.base.ref')
-  git checkout ${BASE}
-else
-  git checkout ${ACS_BRANCH}
-fi
-
-# Add github remote
-git remote add gh https://github.com/apache/cloudstack.git || true
-
-# Apply PR
-if [[ "${PR_ID}" != "" ]]; then
-  git config --global user.email "you@example.com"
-  git config --global user.name "Your Name"
-
-  sed -i 's/^repoName=.*/repoName=cloudstack/g' tools/git/git-pr
-  bash tools/git/git-pr $PR_ID --force
-fi
-
 export PATH="$HOME/.jenv/bin:$PATH"
 if [[ $DISTRO == "centos6" ]]; then
   export PATH=/opt/rh/maven30/root/usr/bin:/opt/rh/rh-java-common/root/usr/bin:$PATH
@@ -60,24 +40,11 @@ java -version
 javac -version
 mvn -version
 
-if [[ "${PR_ID}" != "" ]]; then
-  export MINOR=shapeblue${PR_ID}
-else
-  export MINOR=1
-fi
+export MINOR=1
 
 export VERSION=$(grep '<version>' pom.xml | head -2 | tail -1 | cut -d'>' -f2 |cut -d'<' -f1)
 export BASE_VERSION=$(echo $VERSION | awk -F . '{print $1"."$2}')
-export ACS_BUILD_OPTS="-Dnoredist -Dnonoss"
 export MAVEN_OPTS="-Xmx4096m -XX:MaxPermSize=800m"
-
-LIBS=NONOSS
-git clone https://github.com/shapeblue/cloudstack-nonoss.git $LIBS --depth=1
-cd $LIBS
-bash -x install-non-oss.sh
-cd $ROOT
-cp $LIBS/vhd-util scripts/vm/hypervisor/xenserver/
-chmod +x scripts/vm/hypervisor/xenserver/vhd-util
 
 # Debian stuff
 if [[ $DISTRO == "debian" ]]; then
@@ -112,14 +79,14 @@ else
 
   case $DISTRO in
     centos6)
-      bash -x package.sh -p noredist -d centos63
+      bash -x package.sh -d centos63
       ;;
     centos7)
-      bash -x package.sh -p noredist -o rhel7 -d centos7 --release $MINOR
+      bash -x package.sh -o rhel7 -d centos7 --release $MINOR
       ;;
     centos8)
       ln -sf /usr/bin/python2 /usr/bin/python
-      bash -x package.sh -p noredist -o rhel8 -d centos8 --release $MINOR
+      bash -x package.sh -o rhel8 -d centos8 --release $MINOR
       ;;
   esac
 
