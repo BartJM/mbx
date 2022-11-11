@@ -298,7 +298,7 @@ deploy() {
   echo -e "Building env with name: \033[4m$env\033[0m"
   echo "Management server template: $mst"
   echo "Hypervisor template: $hyt"
-  if [ -n "$local_packages" ]; then
+  if [ -z "$local_packages" ]; then
     echo "Package repo: $repo"
   else
     echo "Package dir: $local_packages"
@@ -393,7 +393,7 @@ deploy() {
   # Setup Management Server
   msip=$(getent hosts $env-mgmt1 | awk '{ print $1 }')
   # Fix CentOS7 repo
-  issh root@$msip "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl=$repo >> /etc/yum.repos.d/cloudstack.repo"
+  issh root@$msip "sed -i '/^baseurl=.*/d' /etc/yum.repos.d/cloudstack.repo && echo baseurl="$repo" >> /etc/yum.repos.d/cloudstack.repo"
   issh root@$msip systemctl enable --now mariadb
   issh root@$msip yum reinstall -y python3-pip
   issh root@$msip "pip3 install --upgrade pip && pip3 install --ignore-installed netaddr mysql-connector-python"
